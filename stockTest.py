@@ -7,6 +7,7 @@ import os
 import json
 from datetime import datetime
 from openai import OpenAI
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="KRX 뉴스-AI 자동화", layout="centered")
 
@@ -30,7 +31,6 @@ news_count = st.number_input("가져올 뉴스 기사 개수 입력", min_value=
 today_only = st.checkbox("금일 기사만", value=False)
 
 file_exists = os.path.isfile(KRX_FILE)
-
 if file_exists and (st.session_state.api_key is not None):
     st.success(f"✅ '{KRX_FILE}' 파일이 확인되었습니다.")
 else:
@@ -70,6 +70,114 @@ def classify_news(title, summary):
     except Exception as e:
         return "분석불가", f"API 오류: {e}"
 
+def find_stock_in_text(text, stock_names):
+    if not isinstance(text, str):
+        return None
+    for name in stock_names:
+        if name in text:
+            return name
+    return None
+
+def get_code_from_name(stock_name):
+    try:
+        matched_rows = df_stocklist[df_stocklist['회사명'] == stock_name]
+        if not matched_rows.empty:
+            code = matched_rows.iloc[0]['종목코드']
+            return str(code).zfill(6)
+        return None
+    except:
+        return None
+
+def safe_float(val):
+    try:
+        return float(str(val).replace(',', ''))
+    except:
+        return None
+
+def crawl_naver_daily_price(stock_code, max_days=60):
+    base_url = "https://finance.naver.com/item/sise_day.naver"
+    all_rows = []
+    page = 1
+
+    while True:
+        params = {'code': stock_code, 'page': page}
+        res = requests.get(base_url, params=params, headers={'User-Agent': 'Mozilla/5.0'})
+        soup = BeautifulSoup(res.text, 'html.parser')
+
+        table = soup.find('table', class_='type2')
+        if not table:
+            break
+
+        rows = table.find_all('tr')
+        data_rows = [row for row in rows if len(row.find_all('td')) == 7]
+        if not data_rows:
+            break
+
+        for row in data_rows:
+            cols = row.find_all('td')
+            date = cols[0].get_text(strip=True).replace('.', '-')
+            close = cols[1].get_text(strip=True).replace(',', '')
+            open_price = cols[3].get_text(strip=True).replace(',', '')
+            high = cols[4].get_text(strip=True).replace(',', '')
+            low = cols[5].get_text(strip=True).replace(',', '')
+            volume = cols[6].get_text(strip=True).replace(',', '')
+            all_rows.append({
+                '날짜': date,
+                '종가': float(close) if close else None,
+                '시가': float(open_price) if open_price else None,
+                '고가': float(high) if high else None,
+                '저가': float(low) if low else None,
+                '거래량': int(volume) if volume else None
+            })
+
+            if len(all_rows) >= max_days:
+                break
+
+        if len(all_rows) >= max_days:
+            break
+
+        page += 1
+
+    df = pd.DataFrame(all_rows)
+    df = df.dropna(subset=['종가'])
+    df['날짜'] = pd.to_datetime(df['날짜'])
+    df = df.sort_values('날짜')
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+def plot_bollinger_20day(df_price, stock_name, stock_code, key=None):
+    if len(df_price) < 20:
+        st.warning(f"{stock_name} 시세 데이터가 부족해 볼린저 밴드를 그릴 수 없습니다.")
+        return
+
+    window = 20
+    df_price[f'MA{window}'] = df_price['종가'].rolling(window=window).mean()
+    df_price[f'STD{window}'] = df_price['종가'].rolling(window=window).std()
+    df_price[f'Upper{window}'] = df_price[f'MA{window}'] + 2 * df_price[f'STD{window}']
+    df_price[f'Lower{window}'] = df_price[f'MA{window}'] - 2 * df_price[f'STD{window}']
+
+    dates = df_price['날짜']
+
+    st.write(f"### {stock_name} 20일 볼린저 밴드")
+    st.markdown(f"[주가 상세 보기](https://finance.naver.com/item/main.nhn?code={stock_code})")
+
+    fig = go.Figure(
+        data=[
+            go.Scatter(x=dates, y=df_price['종가'], mode='lines', name='종가'),
+            go.Scatter(x=dates, y=df_price[f'MA{window}'], mode='lines', name=f'MA{window}'),
+            go.Scatter(x=dates, y=df_price[f'Upper{window}'], mode='lines', name='상단 밴드'),
+            go.Scatter(x=dates, y=df_price[f'Lower{window}'], mode='lines', name='하단 밴드', fill='tonexty', fillcolor='rgba(200,200,200,0.2)'),
+        ],
+        layout=go.Layout(
+            xaxis_title="날짜",
+            yaxis_title="가격",
+            xaxis=dict(range=[dates.min(), dates.max()]),
+            yaxis=dict(autorange=True),
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
 if start:
     with st.spinner("AI 분석 및 데이터 처리중..."):
         try:
@@ -82,14 +190,6 @@ if start:
         except Exception as e:
             st.error(f"엑셀 파일 읽기 오류: {e}")
             st.stop()
-
-        def find_stock_in_text(text, stock_names):
-            if not isinstance(text, str):
-                return None
-            for name in stock_names:
-                if name in text:
-                    return name
-            return None
 
         news_results = []
         cnt = 0
@@ -121,7 +221,6 @@ if start:
                     news_date = article_date_tag.get_text(strip=True)
                     news_date_only = news_date.split(' ')[0]
 
-                    # 오늘 기사만 옵션에 맞춰 캐시에도 적용
                     if today_only and news_date_only != today_str:
                         break
 
@@ -152,7 +251,6 @@ if start:
 
         news_df = pd.DataFrame(news_results).drop_duplicates(['종목명', '뉴스'])
 
-        # JSON 캐시 불러오기
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 cache_dict = json.load(f)
@@ -168,15 +266,12 @@ if start:
         for idx, row in news_df.iterrows():
             cached = cache_dict.get(row['뉴스'])
             if cached:
-                # 금일 기사만 옵션 시 캐시된 날짜도 체크
                 if today_only and cached.get('뉴스날짜') != today_str:
-                    # 오늘 날짜 아니면 GPT 다시 돌림
                     tag, explanation = classify_news(row['뉴스'], row['요약'])
                     news_df.at[idx, '뉴스판별'] = tag
                     news_df.at[idx, 'AI설명'] = explanation
                     st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
                     time.sleep(0.5)
-
                     cache_dict[row['뉴스']] = {
                         '뉴스판별': tag,
                         'AI설명': explanation,
@@ -192,28 +287,14 @@ if start:
                 news_df.at[idx, 'AI설명'] = explanation
                 st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
                 time.sleep(0.5)
-
                 cache_dict[row['뉴스']] = {
                     '뉴스판별': tag,
                     'AI설명': explanation,
                     '뉴스날짜': row['뉴스날짜']
                 }
 
-        # JSON 캐시 저장
         with open(CACHE_FILE, 'w', encoding='utf-8') as f:
             json.dump(cache_dict, f, ensure_ascii=False, indent=2)
-
-        # 재무 데이터 조회, 결과 표 생성 (이전과 동일)
-
-        def get_code_from_name(stock_name):
-            try:
-                matched_rows = df_stocklist[df_stocklist['회사명'] == stock_name]
-                if not matched_rows.empty:
-                    code = matched_rows.iloc[0]['종목코드']
-                    return str(code).zfill(6)
-                return None
-            except:
-                return None
 
         finance_results = []
         unique_stocks = set(news_df['종목명'])
@@ -272,12 +353,6 @@ if start:
 
         df_finance = pd.DataFrame(finance_results)
 
-        def safe_float(val):
-            try:
-                return float(str(val).replace(',', ''))
-            except:
-                return None
-
         if not df_finance.empty:
             df_finance['PER_f'] = df_finance['PER'].apply(safe_float)
             df_finance['ROE_f'] = df_finance['ROE'].apply(safe_float)
@@ -319,8 +394,6 @@ if start:
             '상승여력_표시': '예상주가-현재가'
         })
 
-        st.write("### 📰 오늘 종목 뉴스 ")
-
         def color_news(tag):
             if tag == '호재':
                 return 'color: blue; font-weight: bold;'
@@ -335,8 +408,8 @@ if start:
             color = color_news(row['뉴스판별'])
             return [color] * len(row)
 
-        styled_df = final_df.style.apply(highlight_news, axis=1)
-        st.dataframe(styled_df, use_container_width=True)
+        st.write("### 📰 오늘 종목 뉴스 전체")
+        st.dataframe(final_df.style.apply(highlight_news, axis=1), use_container_width=True)
 
         expecting_stocks = final_df[(final_df['뉴스판별'] == '호재') & (final_df['예상주가-현재가'] != 'N/A')]
 
@@ -349,6 +422,7 @@ if start:
         expecting_stocks = expecting_stocks.copy()
         expecting_stocks['상승여력_숫자'] = expecting_stocks['예상주가-현재가'].apply(to_float)
         expecting_stocks = expecting_stocks.sort_values('상승여력_숫자', ascending=False)
+
         top5_expect = expecting_stocks.head(5)
 
         if not top5_expect.empty:
@@ -358,6 +432,25 @@ if start:
             ]])
         else:
             st.info("호재에 해당하는 종목이 없거나 상승여력 데이터가 부족합니다.")
+
+        st.write("## 📊 호재 종목 20일 볼린저 밴드 차트")
+        for idx, row in expecting_stocks.iterrows():
+            stock_name = row['종목명']
+            code = get_code_from_name(stock_name)
+            if not code:
+                st.warning(f"{stock_name} 종목코드 없음, 차트 생략")
+                continue
+            try:
+                df_price = crawl_naver_daily_price(code, max_days=60)
+                if df_price.empty or len(df_price) < 20:
+                    st.warning(f"{stock_name} 시세 데이터가 부족해 볼린저 밴드를 그릴 수 없습니다.")
+                    continue
+            except Exception as e:
+                st.warning(f"{stock_name} 시세 크롤링 실패: {e}")
+                continue
+
+            unique_key = f"bollinger_{code}_{idx}"
+            plot_bollinger_20day(df_price, stock_name, code, key=unique_key)
 
         def to_html_download(df):
             html = df.to_html(index=False)
