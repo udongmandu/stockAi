@@ -14,4 +14,6 @@ KRX 상장종목 뉴스 + AI 분석 자동화 프로그램
 
 
 
-  2. <img width="1153" height="580" alt="image" src="https://github.com/user-attachments/assets/53b02291-b74c-4229-b0e0-f2adb249b191" /> 가져올 기사 갯수 설정 후 (최대 50개 [처음에만] 늘릴 수록 오래 걸림), '시작' 버튼 클릭
+  2.
+
+    <img width="1153" height="580" alt="image" src="https://github.com/user-attachments/assets/53b02291-b74c-4229-b0e0-f2adb249b191" /> 가져올 기사 갯수 설정 후 (최대 50개 [처음에만] 늘릴 수록 오래 걸림), '시작' 버튼 클릭
