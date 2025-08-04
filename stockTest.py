@@ -427,9 +427,9 @@ if start:
 
     def color_news(tag):
         if tag == '호재':
-            return 'color: blue; font-weight: bold;'
-        elif tag == '악재':
             return 'color: red; font-weight: bold;'
+        elif tag == '악재':
+            return 'color: blue; font-weight: bold;'
         elif tag == '중립':
             return 'color: gray;'
         else:
