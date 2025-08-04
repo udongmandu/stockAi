@@ -1,0 +1,3 @@
+바로 실행 안되면
+chmod +x start_Mac.sh
+./start_Mac.sh
