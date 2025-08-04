@@ -41,7 +41,13 @@ if file_exists and (st.session_state.api_key is not None):
     st.success(f"✅ '{KRX_FILE}' 파일이 확인되었습니다.")
 else:
     if not file_exists:
-        st.warning(f"❌ '{KRX_FILE}' 파일이 폴더에 없습니다.")
+        st.warning(
+            "❌ '{KRX_FILE}' 파일이 폴더에 없습니다.\n"
+            "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13\n"
+            "위 주소에서 파일 받은 후\n"
+            "파일 -> 내보내기 -> 파일 형식 변경 -> Excel 97 - 2003 통합 문서로 내보내기\n"
+            "'krx_temp.xls'로 이름을 변경하여 이 파이썬 파일과 같은 폴더에 위치시켜 주세요."
+        )
     if st.session_state.api_key is None:
         st.warning("❌ OpenAI API 키를 입력해주세요.")
 
