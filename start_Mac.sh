@@ -12,5 +12,5 @@ pip3 install --upgrade pip
 pip3 install streamlit pandas requests beautifulsoup4 openai xlrd
 
 # 앱 실행
-python3 -m streamlit run stockTest.py
+python -m streamlit run stockTest.py
 
