@@ -4,15 +4,17 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import os
+import json
+from datetime import datetime
 from openai import OpenAI
 
 st.set_page_config(page_title="KRX 뉴스-AI 자동화", layout="centered")
 
 KRX_FILE = "krx_temp.xls"
+CACHE_FILE = "cache_news_ai.json"
 
 st.title("KRX 상장종목 뉴스 + AI 분석 자동화")
 
-# API 키 입력
 if 'api_key' not in st.session_state:
     st.session_state.api_key = None
 
@@ -24,10 +26,9 @@ if st.session_state.api_key is None:
 else:
     st.success("✅ API 키 입력 완료")
 
-# 뉴스 기사 개수 입력
 news_count = st.number_input("가져올 뉴스 기사 개수 입력", min_value=1, max_value=50, value=15, step=1)
+today_only = st.checkbox("금일 기사만", value=False)
 
-# KRX 파일 존재 여부 체크
 file_exists = os.path.isfile(KRX_FILE)
 
 if file_exists and (st.session_state.api_key is not None):
@@ -47,9 +48,30 @@ else:
 start_btn_disabled = not (file_exists and st.session_state.api_key is not None)
 start = st.button("🚀 시작", disabled=start_btn_disabled)
 
+def classify_news(title, summary):
+    news_text = f"{title} {summary}"
+    prompt = f"""아래 뉴스가 해당 기업에 호재(상승 가능성), 악재(하락 가능성), 중립 중 어떤 영향을 미칠지 한글로 단답(호재/악재/중립)과 이유(1문장)를 알려줘.
+뉴스: {news_text}"""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0
+        )
+        answer = response.choices[0].message.content.strip()
+        if answer.startswith("호재"):
+            tag = "호재"
+        elif answer.startswith("악재"):
+            tag = "악재"
+        else:
+            tag = "중립"
+        return tag, answer
+    except Exception as e:
+        return "분석불가", f"API 오류: {e}"
+
 if start:
     with st.spinner("AI 분석 및 데이터 처리중..."):
-        # 엑셀 파일 읽기
         try:
             try:
                 df_stocklist = pd.read_excel(KRX_FILE, dtype=str, engine='xlrd')
@@ -61,7 +83,6 @@ if start:
             st.error(f"엑셀 파일 읽기 오류: {e}")
             st.stop()
 
-        # 종목명 포함 확인 함수
         def find_stock_in_text(text, stock_names):
             if not isinstance(text, str):
                 return None
@@ -70,11 +91,11 @@ if start:
                     return name
             return None
 
-        # 여러 페이지 크롤링
         news_results = []
         cnt = 0
         page = 1
         count_limit = news_count
+        today_str = datetime.today().strftime("%Y-%m-%d")
 
         while cnt < count_limit:
             news_url = f"https://finance.naver.com/news/mainnews.naver?&page={page}"
@@ -94,7 +115,16 @@ if start:
                     break
                 article_subject = li.select_one('dd.articleSubject a')
                 article_summary = li.select_one('dd.articleSummary')
-                if article_subject:
+                article_date_tag = li.select_one('dd.articleSummary span.wdate')
+
+                if article_subject and article_date_tag:
+                    news_date = article_date_tag.get_text(strip=True)
+                    news_date_only = news_date.split(' ')[0]
+
+                    # 오늘 기사만 옵션에 맞춰 캐시에도 적용
+                    if today_only and news_date_only != today_str:
+                        break
+
                     title = article_subject.get_text(strip=True)
                     link = article_subject['href']
                     if not link.startswith('http'):
@@ -106,11 +136,15 @@ if start:
                             '종목명': stock,
                             '뉴스': title,
                             '링크': link,
-                            '요약': summary
+                            '요약': summary,
+                            '뉴스날짜': news_date_only
                         })
                         cnt += 1
 
-            page += 1
+            else:
+                page += 1
+                continue
+            break
 
         if len(news_results) == 0:
             st.warning("뉴스에서 상장종목명이 포함된 기사가 없습니다.")
@@ -118,44 +152,59 @@ if start:
 
         news_df = pd.DataFrame(news_results).drop_duplicates(['종목명', '뉴스'])
 
-        # OpenAI API 클라이언트 초기화
+        # JSON 캐시 불러오기
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                cache_dict = json.load(f)
+        else:
+            cache_dict = {}
+
         openai_api_key = st.session_state.api_key
         client = OpenAI(api_key=openai_api_key)
-
-        # AI 뉴스 분석 함수
-        def classify_news(title, summary):
-            news_text = f"{title} {summary}"
-            prompt = f"""아래 뉴스가 해당 기업에 호재(상승 가능성), 악재(하락 가능성), 중립 중 어떤 영향을 미칠지 한글로 단답(호재/악재/중립)과 이유(1문장)를 알려줘.
-뉴스: {news_text}"""
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=100,
-                    temperature=0
-                )
-                answer = response.choices[0].message.content.strip()
-                if answer.startswith("호재"):
-                    tag = "호재"
-                elif answer.startswith("악재"):
-                    tag = "악재"
-                else:
-                    tag = "중립"
-                return tag, answer
-            except Exception as e:
-                return "분석불가", f"API 오류: {e}"
 
         news_df['뉴스판별'] = ""
         news_df['AI설명'] = ""
 
         for idx, row in news_df.iterrows():
-            tag, explanation = classify_news(row['뉴스'], row['요약'])
-            news_df.at[idx, '뉴스판별'] = tag
-            news_df.at[idx, 'AI설명'] = explanation
-            st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
-            time.sleep(0.5)  # API 과부하 방지
+            cached = cache_dict.get(row['뉴스'])
+            if cached:
+                # 금일 기사만 옵션 시 캐시된 날짜도 체크
+                if today_only and cached.get('뉴스날짜') != today_str:
+                    # 오늘 날짜 아니면 GPT 다시 돌림
+                    tag, explanation = classify_news(row['뉴스'], row['요약'])
+                    news_df.at[idx, '뉴스판별'] = tag
+                    news_df.at[idx, 'AI설명'] = explanation
+                    st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
+                    time.sleep(0.5)
 
-        # 재무 데이터 조회 함수
+                    cache_dict[row['뉴스']] = {
+                        '뉴스판별': tag,
+                        'AI설명': explanation,
+                        '뉴스날짜': row['뉴스날짜']
+                    }
+                else:
+                    news_df.at[idx, '뉴스판별'] = cached['뉴스판별']
+                    news_df.at[idx, 'AI설명'] = cached['AI설명']
+                    st.info(f"[캐시] {row['종목명']}: {row['뉴스']} => {cached['뉴스판별']}")
+            else:
+                tag, explanation = classify_news(row['뉴스'], row['요약'])
+                news_df.at[idx, '뉴스판별'] = tag
+                news_df.at[idx, 'AI설명'] = explanation
+                st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
+                time.sleep(0.5)
+
+                cache_dict[row['뉴스']] = {
+                    '뉴스판별': tag,
+                    'AI설명': explanation,
+                    '뉴스날짜': row['뉴스날짜']
+                }
+
+        # JSON 캐시 저장
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+
+        # 재무 데이터 조회, 결과 표 생성 (이전과 동일)
+
         def get_code_from_name(stock_name):
             try:
                 matched_rows = df_stocklist[df_stocklist['회사명'] == stock_name]
@@ -257,7 +306,7 @@ if start:
         result_table = pd.merge(news_df, df_finance, on='종목명', how='left')
         result_table['오늘기사'] = result_table['뉴스판별']
 
-        show_cols = ['종목명', '뉴스', '요약', '뉴스판별', 'AI설명',
+        show_cols = ['종목명', '뉴스', '요약', '뉴스날짜', '뉴스판별', 'AI설명',
                      '예상주가_표시', '현재가_표시', '상승여력_표시', '오늘기사', '링크']
 
         for col in ['예상주가_표시', '현재가_표시', '상승여력_표시']:
@@ -270,14 +319,13 @@ if start:
             '상승여력_표시': '예상주가-현재가'
         })
 
-        # 전체 뉴스 미리보기
         st.write("### 📰 오늘 종목 뉴스 ")
 
         def color_news(tag):
             if tag == '호재':
-                return 'color: red; font-weight: bold;'
-            elif tag == '악재':
                 return 'color: blue; font-weight: bold;'
+            elif tag == '악재':
+                return 'color: red; font-weight: bold;'
             elif tag == '중립':
                 return 'color: gray;'
             else:
@@ -290,7 +338,6 @@ if start:
         styled_df = final_df.style.apply(highlight_news, axis=1)
         st.dataframe(styled_df, use_container_width=True)
 
-        # 가장 기대되는 종목 TOP 5 표시
         expecting_stocks = final_df[(final_df['뉴스판별'] == '호재') & (final_df['예상주가-현재가'] != 'N/A')]
 
         def to_float(x):
@@ -312,7 +359,6 @@ if start:
         else:
             st.info("호재에 해당하는 종목이 없거나 상승여력 데이터가 부족합니다.")
 
-        # HTML 다운로드 버튼
         def to_html_download(df):
             html = df.to_html(index=False)
             b64 = html.encode('utf-8')
