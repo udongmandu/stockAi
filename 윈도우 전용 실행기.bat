@@ -9,8 +9,8 @@ if errorlevel 1 (
 
 REM pip 최신화 및 필요한 패키지 설치
 python -m ensurepip --default-pip >nul 2>&1
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet streamlit pandas requests beautifulsoup4 openai xlrd
+python -m pip install --upgrade pip
+python -m pip install streamlit pandas requests beautifulsoup4 openai xlrd
 
 
 REM streamlit 실행 (python 모듈 방식)

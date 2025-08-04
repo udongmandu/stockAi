@@ -9,8 +9,8 @@ fi
 
 # pip 최신화 및 필요한 패키지 설치
 python3 -m ensurepip --default-pip
-python3 -m pip install --quiet --upgrade pip
-python3 -m pip install --quiet streamlit pandas requests beautifulsoup4 openai xlrd
+python3 -m pip install --upgrade pip
+python3 -m pip install streamlit pandas requests beautifulsoup4 openai xlrd
 
 # streamlit 실행
 echo "Streamlit 서버를 시작합니다. 종료하려면 Ctrl+C 누르세요."

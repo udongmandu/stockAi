@@ -8,24 +8,30 @@ import json
 from datetime import datetime
 from openai import OpenAI
 import plotly.graph_objects as go
+from dotenv import load_dotenv
 
-st.set_page_config(page_title="KRX 뉴스-AI 자동화", layout="centered")
+# .env 파일 로드
+load_dotenv()
 
 KRX_FILE = "krx_temp.xls"
 CACHE_FILE = "cache_news_ai.json"
 
+st.set_page_config(page_title="KRX 뉴스-AI 자동화", layout="centered")
 st.title("KRX 상장종목 뉴스 + AI 분석 자동화")
 
+# 환경변수에서 API 키 읽기
+api_key_env = os.getenv("OPENAI_API_KEY")
+
 if 'api_key' not in st.session_state:
-    st.session_state.api_key = None
+    st.session_state.api_key = api_key_env
 
 def submit_api_key():
     st.session_state.api_key = st.session_state.api_key_input
 
 if st.session_state.api_key is None:
-    st.text_input("OpenAI API 키를 입력하세요", type="password", key="api_key_input", on_change=submit_api_key)
+    st.text_input("API 키가 있는 ENV 파일을 받아 주세요.", type="password", key="api_key_input", on_change=submit_api_key)
 else:
-    st.success("✅ API 키 입력 완료")
+    st.success("✅ ENV 파일 인식 완료")
 
 news_count = st.number_input("가져올 뉴스 기사 개수 입력", min_value=1, max_value=50, value=15, step=1)
 today_only = st.checkbox("금일 기사만", value=False)
@@ -48,6 +54,14 @@ else:
 start_btn_disabled = not (file_exists and st.session_state.api_key is not None)
 start = st.button("🚀 시작", disabled=start_btn_disabled)
 
+def find_stock_in_text(text, stock_names):
+    if not isinstance(text, str):
+        return None
+    for name in stock_names:
+        if name in text:
+            return name
+    return None
+
 def classify_news(title, summary):
     news_text = f"{title} {summary}"
     prompt = f"""아래 뉴스가 해당 기업에 호재(상승 가능성), 악재(하락 가능성), 중립 중 어떤 영향을 미칠지 한글로 단답(호재/악재/중립)과 이유(1문장)를 알려줘.
@@ -69,14 +83,6 @@ def classify_news(title, summary):
         return tag, answer
     except Exception as e:
         return "분석불가", f"API 오류: {e}"
-
-def find_stock_in_text(text, stock_names):
-    if not isinstance(text, str):
-        return None
-    for name in stock_names:
-        if name in text:
-            return name
-    return None
 
 def get_code_from_name(stock_name):
     try:
@@ -419,11 +425,10 @@ if start:
             except:
                 return -9999999
 
-        expecting_stocks = expecting_stocks.copy()
-        expecting_stocks['상승여력_숫자'] = expecting_stocks['예상주가-현재가'].apply(to_float)
-        expecting_stocks = expecting_stocks.sort_values('상승여력_숫자', ascending=False)
+        expecting_stocks_unique = expecting_stocks.sort_values('예상주가-현재가', ascending=False) \
+                                                 .drop_duplicates(subset=['종목명'], keep='first')
 
-        top5_expect = expecting_stocks.head(5)
+        top5_expect = expecting_stocks_unique.head(5)
 
         if not top5_expect.empty:
             st.write("### 🚀 가장 기대되는 종목 TOP 5 (호재 + 상승여력 높은 순)")
@@ -434,7 +439,7 @@ if start:
             st.info("호재에 해당하는 종목이 없거나 상승여력 데이터가 부족합니다.")
 
         st.write("## 📊 호재 종목 20일 볼린저 밴드 차트")
-        for idx, row in expecting_stocks.iterrows():
+        for idx, row in expecting_stocks_unique.iterrows():
             stock_name = row['종목명']
             code = get_code_from_name(stock_name)
             if not code:
@@ -442,15 +447,10 @@ if start:
                 continue
             try:
                 df_price = crawl_naver_daily_price(code, max_days=60)
-                if df_price.empty or len(df_price) < 20:
-                    st.warning(f"{stock_name} 시세 데이터가 부족해 볼린저 밴드를 그릴 수 없습니다.")
-                    continue
             except Exception as e:
                 st.warning(f"{stock_name} 시세 크롤링 실패: {e}")
                 continue
-
-            unique_key = f"bollinger_{code}_{idx}"
-            plot_bollinger_20day(df_price, stock_name, code, key=unique_key)
+            plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_{code}_{idx}")
 
         def to_html_download(df):
             html = df.to_html(index=False)
