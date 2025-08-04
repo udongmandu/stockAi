@@ -7,10 +7,11 @@ then
     exit 1
 fi
 
-# 패키지 설치 (필요시)
-pip3 install --upgrade pip
-pip3 install streamlit pandas requests beautifulsoup4 openai xlrd
+# pip 최신화 및 필요한 패키지 설치
+python3 -m ensurepip --default-pip
+python3 -m pip install --quiet --upgrade pip
+python3 -m pip install --quiet streamlit pandas requests beautifulsoup4 openai xlrd
 
-# 앱 실행
-python -m streamlit run stockTest.py
-
+# streamlit 실행
+echo "Streamlit 서버를 시작합니다. 종료하려면 Ctrl+C 누르세요."
+python3 -m streamlit run stockTest.py
