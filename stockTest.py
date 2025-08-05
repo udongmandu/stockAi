@@ -33,8 +33,8 @@ if st.session_state.api_key is None:
 else:
     st.success("✅ ENV 파일 인식 완료")
 
-news_count = st.number_input("가져올 뉴스 기사 개수 입력", min_value=1, max_value=50, value=15, step=1)
-today_only = st.checkbox("금일 기사만", value=False)
+news_count = st.number_input("가져올 뉴스 기사 개수 입력", min_value=1, max_value=50, value=20, step=1)
+today_only = st.checkbox("금일 기사만", value=True)
 
 file_exists = os.path.isfile(KRX_FILE)
 if file_exists and (st.session_state.api_key is not None):
@@ -518,17 +518,5 @@ if start:
 
         plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_{code}_{idx}", news_dict=date_news_map)
 
-    def to_html_download(df):
-        html = df.to_html(index=False)
-        b64 = html.encode('utf-8')
-        return b64
-
-    b64_html = to_html_download(final_df)
-    st.download_button(
-        label="📥 HTML 다운로드",
-        data=b64_html,
-        file_name="stock_news_ai_result.html",
-        mime="text/html"
-    )
 
     st.session_state.is_running = False
