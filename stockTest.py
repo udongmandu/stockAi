@@ -153,7 +153,7 @@ def crawl_naver_daily_price(stock_code, max_days=60):
     df.reset_index(drop=True, inplace=True)
     return df
 
-def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dates=None):
+def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dict=None):
     if len(df_price) < 20:
         st.warning(f"{stock_name} 시세 데이터가 부족해 볼린저 밴드를 그릴 수 없습니다.")
         return
@@ -165,9 +165,11 @@ def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dates=
     df_price[f'Lower{window}'] = df_price[f'MA{window}'] - 2 * df_price[f'STD{window}']
 
     dates = df_price['날짜']
+    max_date = dates.max()
+    min_date = dates.min()
 
     st.write(f"### {stock_name} 20일 볼린저 밴드")
-    st.markdown(f"[주가 상세 보기](https://finance.naver.com/item/main.nhn?code={stock_code})")
+    st.markdown(f"[주가 상세 보기](https://finance.naver.com/item/main.nhn?code={stock_code})", unsafe_allow_html=True)
 
     fig = go.Figure(
         data=[
@@ -179,26 +181,37 @@ def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dates=
         layout=go.Layout(
             xaxis_title="날짜",
             yaxis_title="가격",
-            xaxis=dict(range=[dates.min(), dates.max()]),
-            yaxis=dict(autorange=True),
+            xaxis=dict(
+                range=[min_date, max_date + pd.Timedelta(days=3)],
+                fixedrange=True
+            ),
+            yaxis=dict(
+                autorange=True,
+                fixedrange=True
+            ),
+            dragmode="pan"
         )
     )
 
-    if news_dates:
-        for nd in news_dates:
+
+    if news_dict:
+        for nd, news_list in news_dict.items():
             try:
                 nd_dt = pd.to_datetime(nd)
                 price_row = df_price[df_price['날짜'] == nd_dt]
                 if not price_row.empty:
                     price = price_row.iloc[0]['종가']
+                    news_text = "<br>".join([n['title'] for n in news_list])
                     fig.add_trace(go.Scatter(
                         x=[nd_dt],
                         y=[price],
                         mode='markers+text',
-                        marker=dict(color='orange', size=12, symbol='star'),
-                        text=["📰 뉴스"],
+                        marker=dict(color='orange', size=7, symbol='circle'),
+                        text=["📰"],
                         textposition="top center",
                         name=f"뉴스({nd})",
+                        hoverinfo='text',
+                        hovertext=news_text,
                         showlegend=False
                     ))
             except Exception:
@@ -476,11 +489,34 @@ if start:
             st.warning(f"{stock_name} 시세 크롤링 실패: {e}")
             continue
 
-        news_dates_for_stock = news_df[
-            (news_df['종목명'] == stock_name) & (news_df['뉴스판별'] == '호재')
-        ]['뉴스날짜'].unique().tolist()
+        # 뉴스 날짜별로 묶기 (현재 뉴스 + 캐시)
+        date_news_map = {}
 
-        plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_{code}_{idx}", news_dates=news_dates_for_stock)
+        # 현재 뉴스
+        for _, nrow in news_df[news_df['종목명'] == stock_name].iterrows():
+            dt = nrow['뉴스날짜']
+            if dt not in date_news_map:
+                date_news_map[dt] = []
+            date_news_map[dt].append({
+                'title': nrow['뉴스'],
+                'link': nrow['링크']
+            })
+
+        # 캐시 뉴스 추가
+        for news_text, val in cache_dict.items():
+            dt = val.get('뉴스날짜')
+            if dt:
+                if stock_name in news_text:
+                    if dt not in date_news_map:
+                        date_news_map[dt] = []
+                    # 중복 제거
+                    if not any(n['title'] == news_text for n in date_news_map[dt]):
+                        date_news_map[dt].append({
+                            'title': news_text,
+                            'link': None
+                        })
+
+        plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_{code}_{idx}", news_dict=date_news_map)
 
     def to_html_download(df):
         html = df.to_html(index=False)
