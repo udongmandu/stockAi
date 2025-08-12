@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 import plotly.graph_objects as go
 from dotenv import load_dotenv
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # .env 파일 로드
 load_dotenv()
@@ -34,7 +36,7 @@ def get_session():
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     })
 
-    # ★ 추가: 커넥션 풀/재시도 설정
+    # 커넥션 풀/재시도
     retry = Retry(
         total=3, backoff_factor=0.3,
         status_forcelist=[429, 500, 502, 503, 504],
@@ -43,9 +45,7 @@ def get_session():
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
-
     return s
-
 
 SESSION = get_session()
 
@@ -270,6 +270,70 @@ toggle_label = "↩ 일반 모드로 전환" if st.session_state.specific_mode e
 if st.button(toggle_label):
     st.session_state.specific_mode = not st.session_state.specific_mode
 
+# ------------------- 속도 개선 도우미 -------------------
+@st.cache_data(ttl=600)
+def get_last_page_for_date(date_param: str) -> int:
+    """
+    해당 날짜(date=YYYYMMDD)의 mainnews 마지막 페이지 번호를 추정.
+    - '맨뒤' 링크가 있으면 그 page 파라미터
+    - 없으면 페이징 숫자 링크 중 최대값
+    """
+    url = NEWS_BY_DATE_URL.format(date=date_param, page=1)
+    res = SESSION.get(url, timeout=10)
+    soup = BeautifulSoup(res.content, "lxml")
+
+    last_link = soup.select_one("td.pgRR a")
+    if last_link and last_link.get("href"):
+        m = re.search(r"page=(\d+)", last_link["href"])
+        if m:
+            return int(m.group(1))
+
+    pages = []
+    for a in soup.select("table.Nnavi a"):
+        txt = (a.get_text(strip=True) or "").strip()
+        if txt.isdigit():
+            pages.append(int(txt))
+    return max(pages) if pages else 1
+
+def parse_mainnews_page(html_bytes, fallback_date_str: str, stock_key_norm: str):
+    """
+    mainnews 한 페이지에서 해당 종목 키워드가 제목/요약에 있으면 결과 리스트로 반환
+    """
+    soup = BeautifulSoup(html_bytes, "lxml")
+    items = soup.select("ul.newsList > li")
+    results = []
+    if not items:
+        return results
+
+    for li in items:
+        a = li.select_one("dd.articleSubject a")
+        sm = li.select_one("dd.articleSummary")
+        if not a or not sm:
+            continue
+
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+        link = href if href.startswith("http") else "https://finance.naver.com" + href
+        summary = sm.get_text(" ", strip=True)
+
+        dt_tag = sm.select_one("span.wdate")
+        if dt_tag:
+            news_date_only = dt_tag.get_text(strip=True).split(" ")[0].replace(".", "-")
+        else:
+            news_date_only = fallback_date_str
+
+        title_key = normalize_text(title)
+        summary_key = normalize_text(summary)
+        if (stock_key_norm in title_key) or (stock_key_norm in summary_key):
+            results.append({
+                "종목명": None,  # 나중에 채움
+                "뉴스": title,
+                "링크": link,
+                "요약": summary,
+                "뉴스날짜": news_date_only,
+            })
+    return results
+
 # ------------------- 모드별 UI/로직 -------------------
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
@@ -286,83 +350,60 @@ if st.session_state.specific_mode:
 
     def crawl_mainnews_by_dates_for_stock(stock_name: str, days: int = 30, max_pages_per_day: int = 200):
         """
-        주요뉴스(mainnews)에서 date=YYYYMMDD & page=1..N 전부 순회.
-        각 li에서 제목/요약 둘 다에 stock_name이 등장하면 수집.
+        주요뉴스(mainnews)에서 date=YYYYMMDD의 1..last_page를 병렬 크롤링.
+        각 li에서 제목/요약 둘 다에 stock_name(정규화)이 등장하면 수집.
         """
         results = []
         today = datetime.today().date()
-
-        # 비교를 안전하게(공백 제거 + 소문자)
-        stock_key = normalize_text(stock_name)
+        stock_key_norm = normalize_text(stock_name)
+        MAX_WORKERS = 12  # 네트워크/머신 환경 따라 8~16 사이에서 조절 추천
 
         for i in range(days):
             d = today - timedelta(days=i)
             date_param = d.strftime("%Y%m%d")
+            fallback_date_str = d.strftime("%Y-%m-%d")
 
-            page = 1
-            while True:
-                url = NEWS_BY_DATE_URL.format(date=date_param, page=page)
-                try:
-                    res = SESSION.get(url, timeout=10)
-                    soup = BeautifulSoup(res.content, "lxml")
-                except Exception as e:
-                    st.warning(f"[{date_param}] 주요뉴스 요청 실패(page {page}): {e}")
-                    break
+            try:
+                last_page = get_last_page_for_date(date_param)
+                last_page = min(last_page, max_pages_per_day)
+            except Exception as e:
+                st.warning(f"[{date_param}] 마지막 페이지 파악 실패: {e} (1페이지만 시도)")
+                last_page = 1
 
-                items = soup.select("ul.newsList > li")
-                if not items:
-                    # 더 이상 페이지 없음
-                    break
+            page_indices = list(range(1, last_page + 1))
 
-                for li in items:
-                    a = li.select_one("dd.articleSubject a")
-                    sm = li.select_one("dd.articleSummary")
-                    if not a or not sm:
-                        continue
+            # 병렬 크롤링
+            page_results = []
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                future_to_page = {
+                    ex.submit(
+                        lambda p: parse_mainnews_page(
+                            SESSION.get(NEWS_BY_DATE_URL.format(date=date_param, page=p), timeout=10).content,
+                            fallback_date_str, stock_key_norm
+                        ), page
+                    ): page for page in page_indices
+                }
+                for fut in as_completed(future_to_page):
+                    try:
+                        part = fut.result() or []
+                        page_results.extend(part)
+                    except Exception:
+                        # 개별 페이지 실패는 무시
+                        pass
 
-                    # 제목/링크
-                    title = a.get_text(strip=True)
-                    href = a.get("href", "")
-                    link = href if href.startswith("http") else "https://finance.naver.com" + href
+            # 종목명 채우고 합치기
+            for r in page_results:
+                r["종목명"] = stock_name
+            results.extend(page_results)
 
-                    # 요약(언론사, 날짜가 포함되어 들어오지만 키워드 매칭에는 문제 없음)
-                    summary = sm.get_text(" ", strip=True)
-
-                    # 날짜(페이지 date는 하루 고정이지만, 안전하게 파싱)
-                    dt_tag = sm.select_one("span.wdate")
-                    if dt_tag:
-                        news_date_only = dt_tag.get_text(strip=True).split(" ")[0].replace(".", "-")
-                    else:
-                        # 못 찾으면 페이지의 날짜를 사용
-                        news_date_only = d.strftime("%Y-%m-%d")
-
-                    # 제목/요약 모두 검사 (정규화 비교)
-                    title_key = normalize_text(title)
-                    summary_key = normalize_text(summary)
-                    if (stock_key in title_key) or (stock_key in summary_key):
-                        results.append({
-                            "종목명": stock_name,
-                            "뉴스": title,
-                            "링크": link,
-                            "요약": summary,
-                            "뉴스날짜": news_date_only,
-                        })
-
-                page += 1
-                if page > max_pages_per_day:  # 안전장치
-                    break
-
-        # 중복 제거 + 날짜/제목 기준 정렬
+        # 중복 제거 + 정렬
         results = list({(r["뉴스"], r["뉴스날짜"]): r for r in results}.values())
         results.sort(key=lambda x: (x["뉴스날짜"], x["뉴스"]))
         return results
 
-
-
     if run_specific:
-        st.info(f"선택 종목: {selected_stock} / 최근 {int(days_to_fetch)}일 기사 수집 중…")
+        st.info(f"선택 종목: {selected_stock} / 최근 {int(days_to_fetch)}일 기사 수집 중… (가져올 뉴스의 갯수가 많을 수록 느립니다요)")
         news_list = crawl_mainnews_by_dates_for_stock(selected_stock, days=int(days_to_fetch))
-
         if len(news_list) == 0:
             st.warning("해당 기간에 해당 종목명이 포함된 기사가 없습니다.")
         else:
@@ -418,7 +459,7 @@ else:
         """
         네이버 금융 메인뉴스를 page=1부터 기사 없을 때까지 전부 순회.
         제목/요약에 종목명이 포함되면 수집.
-        today_only=True면 '오늘 날짜'가 아닌 기사부터는 이후 페이지 순회 중단.
+        today_only=True면 '오늘 날짜'가 아닌 기사부터는 이후 페이지 순회 조기 종료.
         """
         results = []
         stock_set = set(stock_names)
@@ -432,11 +473,11 @@ else:
                 soup = BeautifulSoup(res.content, "lxml")
             except Exception as e:
                 st.error(f"네이버 뉴스 크롤링 오류 (페이지 {page}): {e}")
-                break
+                return results  # 실패 시 조기 반환
 
             items = soup.select("ul.newsList > li")
             if not items:
-                break  # 더 이상 페이지 없음
+                return results  # 더 이상 페이지 없음 -> 즉시 반환
 
             hit_non_today = False  # 오늘만 보기일 때, 비-오늘 기사 만나면 이후 페이지 중단
 
@@ -450,7 +491,7 @@ else:
                 # 날짜
                 news_date_only = dt_tag.get_text(strip=True).split(" ")[0].replace(".", "-")
 
-                # 오늘만 보기면, 비-오늘 기사부터는 이 페이지 이후로 중단
+                # 오늘만 보기면, 비-오늘 기사부터는 종료 플래그
                 if today_only and news_date_only != today_str:
                     hit_non_today = True
                     continue
@@ -473,24 +514,20 @@ else:
                     })
 
             if today_only and hit_non_today:
-                break  # 오늘 기사 끝났으니 종료
+                return results  # 오늘 기사 끝났으니 즉시 반환
 
             page += 1
             if page > max_pages:
-                break  # 안전장치
-
-        # 중복 제거
-        results = list({(r["종목명"], r["뉴스"]): r for r in results}.values())
-        return results
+                return results  # 안전장치
 
     if start:
         st.session_state.is_running = True
 
-        # ▼▼▼ 여기: 일반 모드 수집 한 줄로 대체 ▼▼▼
+        # ▼▼▼ 일반 모드 수집
         news_results = crawl_mainnews_all_pages(
             stock_names=stock_names,
             today_only=today_only,
-            max_pages=200,  # 필요 시 조절
+            max_pages=200,
         )
 
         if len(news_results) == 0:
@@ -498,9 +535,8 @@ else:
             st.session_state.is_running = False
             st.stop()
 
-        # 화면 표시용으로 상위 news_count개만 잘라서 보여줄 수 있음
+        # 화면 표시용으로 상위 news_count개만
         news_results_display = news_results[:news_count]
-
         news_df = pd.DataFrame(news_results_display).drop_duplicates(["종목명", "뉴스"])
 
         # 캐시
