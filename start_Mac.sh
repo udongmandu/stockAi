@@ -1,29 +1,60 @@
 #!/bin/bash
 
 # ────────────────────────────────
-# Python 3 설치 확인
-if ! command -v python3 &> /dev/null
-then
-    echo "❌ Python 3이 설치되어 있지 않습니다. 설치 후 다시 시도하세요."
+# 현재 스크립트 위치로 이동
+cd "$(dirname "$0")" || exit 1
+
+# 실행할 Streamlit 파일명
+FILE="stockTest.py"
+
+# 로그 파일
+LOG="run_log.txt"
+> "$LOG"
+
+echo "[STEP] Python check" | tee -a "$LOG"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ Python3 not found. Please install and ensure it's in your PATH." | tee -a "$LOG"
     exit 1
 fi
 
-# ────────────────────────────────
-# pip 최신화
-echo "🔄 pip 설치 및 업그레이드..."
-python3 -m ensurepip --default-pip
-python3 -m pip install --upgrade pip
+echo "[STEP] pip check" | tee -a "$LOG"
+python3 -m ensurepip --default-pip >> "$LOG" 2>&1
+if ! python3 -m pip --version >> "$LOG" 2>&1; then
+    echo "❌ pip is not available." | tee -a "$LOG"
+    exit 1
+fi
 
-# ────────────────────────────────
-# requirements.txt로 패키지 설치
-echo "📦 requirements.txt 기반 패키지 설치..."
-python3 -m pip install -r requirements.txt
+echo "[STEP] pip upgrade" | tee -a "$LOG"
+if ! python3 -m pip install --upgrade pip >> "$LOG" 2>&1; then
+    echo "❌ Failed to upgrade pip." | tee -a "$LOG"
+    exit 1
+fi
 
-# ────────────────────────────────
-# 실행할 Streamlit 파일명 설정
-FILE="stockTest.py"
+if [ -f "requirements.txt" ]; then
+    echo "[STEP] Installing requirements.txt" | tee -a "$LOG"
+    if ! python3 -m pip install -r requirements.txt >> "$LOG" 2>&1; then
+        echo "❌ Failed to install requirements." | tee -a "$LOG"
+        exit 1
+    fi
+else
+    echo "[INFO] requirements.txt not found -> skipped" | tee -a "$LOG"
+fi
 
-# ────────────────────────────────
-# Streamlit 앱 실행
-echo "🚀 Streamlit 서버를 시작합니다. 종료하려면 Ctrl+C 누르세요."
+echo "[STEP] Streamlit check" | tee -a "$LOG"
+if ! python3 -c "import streamlit,sys;print(streamlit.__version__)" >> "$LOG" 2>&1; then
+    echo "❌ Streamlit not installed or cannot be imported." | tee -a "$LOG"
+    exit 1
+fi
+
+if [ ! -f "$FILE" ]; then
+    echo "❌ File not found: $FILE" | tee -a "$LOG"
+    exit 1
+fi
+
+echo "[STEP] Starting Streamlit app" | tee -a "$LOG"
 python3 -m streamlit run "$FILE"
+
+echo "[INFO] Log (recent):"
+tail -n 20 "$LOG"
+
+echo "✅ Server terminated"
