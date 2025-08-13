@@ -271,11 +271,6 @@ if st.button(toggle_label):
 # ------------------- 속도 개선 도우미 -------------------
 @st.cache_data(ttl=600)
 def get_last_page_for_date(date_param: str) -> int:
-    """
-    해당 날짜(date=YYYYMMDD)의 mainnews 마지막 페이지 번호를 추정.
-    - '맨뒤' 링크가 있으면 그 page 파라미터
-    - 없으면 페이징 숫자 링크 중 최대값
-    """
     url = NEWS_BY_DATE_URL.format(date=date_param, page=1)
     res = SESSION.get(url, timeout=10)
     soup = BeautifulSoup(res.content, "lxml")
@@ -351,11 +346,6 @@ if st.session_state.specific_mode:
     run_specific = st.button("🔎 뉴스 검색 (특정 기사만 보기) 실행", disabled=not can_run_specific)
 
     def crawl_mainnews_by_dates_for_stocks(stock_names, days: int = 30, max_pages_per_day: int = 200):
-        """
-        주요뉴스(mainnews)에서 date=YYYYMMDD & page=1..N 전부 순회.
-        여러 종목명을 한 번에 받아 제목/요약 둘 다에 등장하면 수집.
-        (속도개선) 종목 매칭은 정규식 1회 검색, 날짜별 최대 페이지 동적 추출.
-        """
         results = []
         today = datetime.today().date()
 
@@ -377,7 +367,7 @@ if st.session_state.specific_mode:
             date_param = d.strftime("%Y%m%d")
 
             page = 1
-            max_page = None  # 날짜별 실제 마지막 페이지
+            max_page = None
 
             while True:
                 url = NEWS_BY_DATE_URL.format(date=date_param, page=page)
@@ -569,7 +559,7 @@ else:
 
     if start:
         st.session_state.is_running = True
-
+        st.info(f"기사 수집 중… (기사의 개수가 많을 수록 좀 걸려용)")
         # ▼▼▼ 일반 모드 수집
         news_results = crawl_mainnews_all_pages(
             stock_names=stock_names,
@@ -682,7 +672,7 @@ else:
             df_finance["예상주가"] = df_finance["EPS_f"] * 10
             df_finance["예상주가_표시"] = df_finance["예상주가"].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "N/A")
             df_finance["상승여력"] = df_finance["예상주가"] - df_finance["현재가_f"]
-
+            
             def format_sign(x):
                 if pd.isnull(x): return "N/A"
                 if x > 0: return f"+{x:,.0f}"
@@ -719,8 +709,7 @@ else:
         def to_float(x):
             try: return float(str(x).replace(",", "").replace("+", ""))
             except Exception: return -9999999
-        expecting_stocks_unique = expecting_stocks.sort_values("예상주가-현재가", ascending=False)\
-                                                 .drop_duplicates(subset=["종목명"], keep="first")
+        expecting_stocks_unique = expecting_stocks.sort_values("예상주가-현재가", ascending=False).drop_duplicates(subset=["종목명"], keep="first")
         top5_expect = expecting_stocks_unique.head(5)
         if not top5_expect.empty:
             st.write("### 🚀 가장 기대되는 종목 TOP 5 (호재 + 상승여력 높은 순)")
