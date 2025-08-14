@@ -437,6 +437,7 @@ if st.session_state.specific_mode:
 
     if run_specific:
         st.info(f"선택 종목: {', '.join(selected_stocks)} / 최근 {int(days_to_fetch)}일 기사 수집 중… (기사의 개수가 많을 수록 좀 걸려용)")
+        st.info(f"시작 버튼을 연속해서 누르지 마세요 지금 실행중입니다.")
         news_list = crawl_mainnews_by_dates_for_stocks(selected_stocks, days=int(days_to_fetch))
 
         if len(news_list) == 0:
@@ -560,6 +561,7 @@ else:
     if start:
         st.session_state.is_running = True
         st.info(f"기사 수집 중… (기사의 개수가 많을 수록 좀 걸려용)")
+        st.info(f"시작 버튼을 연속해서 누르지 마세요 지금 실행중입니다.")
         # ▼▼▼ 일반 모드 수집
         news_results = crawl_mainnews_all_pages(
             stock_names=stock_names,
