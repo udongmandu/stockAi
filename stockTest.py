@@ -617,7 +617,6 @@ else:
         for idx, row in news_df.iterrows():
             cached = cache_dict.get(row["뉴스"])
             if cached:
-                # 캐시가 있으면 그대로 사용
                 news_df.at[idx, "뉴스판별"] = cached["tag"]
                 news_df.at[idx, "AI설명"] = cached["description"]
                 news_df.at[idx, "카테고리"] = cached["category"]
