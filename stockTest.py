@@ -9,12 +9,31 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from dotenv import load_dotenv
 import re
+from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 
 # .env 파일 로드
 load_dotenv()
 
+# db 연결
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_PASSWORD_SAFE = quote_plus(DB_PASSWORD)
+DB_NAME = os.getenv("DB_NAME")
+DB_PORT = os.getenv("DB_PORT", 3306)
+
+engine = create_engine(
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD_SAFE}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+    echo=True
+)
+
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT NOW();"))
+    print("DB 연결 성공 ✅ 현재 시간:", result.scalar())
+    
+
 KRX_FILE = "krx_temp.xls"
-CACHE_FILE = "cache_news_ai.json"
 
 # 날짜별 섹션 뉴스(일반 모드)
 NEWS_BY_DATE_URL = "https://finance.naver.com/news/mainnews.naver?&date={date}&page={page}"
@@ -115,6 +134,7 @@ if st.session_state.api_key is None:
     st.text_input("API 키가 있는 ENV 파일을 받아 주세요.", type="password", key="api_key_input", on_change=submit_api_key)
 else:
     st.success("✅ ENV 파일 인식 완료")
+    
 
 # 모드 토글 상태
 if "specific_mode" not in st.session_state:
@@ -241,6 +261,30 @@ def safe_float(val):
 
 def crawl_naver_daily_price(stock_code, max_days=60):
     return crawl_naver_daily_price_cached(stock_code, max_days=max_days)
+
+def get_existing_news(engine, title):
+    sql = text("SELECT id, tag, category, description, date FROM NEWS_DATA WHERE title = :title")
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"title": title}).fetchone()
+        if row:
+            return dict(row._mapping)
+    return None
+
+def insert_news_to_db(engine, title, tag, category, description, date_str):
+    sql = text("""
+        INSERT INTO NEWS_DATA (title, tag, category, description, date)
+        VALUES (:title, :tag, :category, :description, :date)
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, {
+            "title": title,
+            "tag": tag,
+            "category": category,
+            "description": description,
+            "date": date_str
+        })
+
+
 
 def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dict=None):
     if len(df_price) < 20:
@@ -501,7 +545,6 @@ if st.session_state.specific_mode:
 else:
     news_count = st.number_input("가져올 뉴스 기사 개수 입력 (표시용)", min_value=1, max_value=200, value=20, step=1)
     today_only = st.checkbox("금일 기사만", value=True)
-    graph_show_in_cache = st.checkbox("지금 까지 모든 데이터 보기", value=False)
 
     start_btn_disabled = not (file_exists and st.session_state.api_key is not None)
     start = st.button("🚀 시작 (기본 모드)", disabled=start_btn_disabled or st.session_state.is_running)
@@ -585,7 +628,6 @@ else:
         st.session_state.is_running = True
         st.info(f"기사 수집 중… (기사의 개수가 많을 수록 좀 걸려용)")
         st.info(f"시작 버튼을 연속해서 누르지 마세요 지금 실행중입니다.")
-        # ▼▼▼ 일반 모드 수집
         news_results = crawl_mainnews_all_pages(
             stock_names=stock_names,
             today_only=today_only,
@@ -596,17 +638,9 @@ else:
             st.warning("뉴스에서 상장종목명이 포함된 기사가 없습니다.")
             st.session_state.is_running = False
             st.stop()
-
-        # 화면 표시용으로 상위 news_count개만
+            
         news_results_display = news_results[:news_count]
         news_df = pd.DataFrame(news_results_display).drop_duplicates(["종목명", "뉴스"])
-
-        # 캐시
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cache_dict = json.load(f)
-        else:
-            cache_dict = {}
 
         openai_api_key = st.session_state.api_key
 
@@ -615,30 +649,21 @@ else:
         today_str = datetime.today().strftime("%Y-%m-%d")
 
         for idx, row in news_df.iterrows():
-            cached = cache_dict.get(row["뉴스"])
-            if cached:
-                news_df.at[idx, "뉴스판별"] = cached["tag"]
-                news_df.at[idx, "AI설명"] = cached["description"]
-                news_df.at[idx, "카테고리"] = cached["category"]
-                st.info(f"[캐시] {row['종목명']}: {row['뉴스']} => {cached['tag']}")
+            existing = get_existing_news(engine, row["뉴스"])
+            if existing:
+                news_df.at[idx, "뉴스판별"] = existing["tag"]
+                news_df.at[idx, "AI설명"] = existing["description"]
+                news_df.at[idx, "카테고리"] = existing["category"]
+                st.info(f"[DB] {row['종목명']}: {row['뉴스']} => {existing['tag']}")
             else:
                 ai_result = classify_news(row["뉴스"], row["요약"])
                 news_df.at[idx, "뉴스판별"] = ai_result["tag"]
                 news_df.at[idx, "AI설명"] = ai_result["description"]
                 news_df.at[idx, "카테고리"] = ai_result["category"]
 
-                cache_dict[row["뉴스"]] = {
-                    "tag": ai_result["tag"],
-                    "description": ai_result["description"],
-                    "category": ai_result["category"],
-                    "뉴스날짜": row["뉴스날짜"]
-                }
+                insert_news_to_db(engine, row["뉴스"], ai_result["tag"], ai_result["category"], ai_result["description"], row["뉴스날짜"])
                 st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {ai_result['tag']}")
                 time.sleep(0.05)
-
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_dict, f, ensure_ascii=False, indent=2)
-
 
         # 재무
         finance_results = []
@@ -756,13 +781,6 @@ else:
             date_news_map = {}
             for _, nrow in news_df[news_df["종목명"] == stock_name].iterrows():
                 dt = nrow["뉴스날짜"]; date_news_map.setdefault(dt, []).append({"title": nrow["뉴스"], "link": nrow["링크"]})
-            if os.path.exists(CACHE_FILE):
-                for news_text, val in cache_dict.items():
-                    dt = val.get("뉴스날짜")
-                    if dt and (stock_name in news_text):
-                        date_news_map.setdefault(dt, [])
-                        if not any(n["title"] == news_text for n in date_news_map[dt]):
-                            date_news_map[dt].append({"title": news_text, "link": None})
             plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_good_{code}_{idx}", news_dict=date_news_map)
 
         # 악재 차트
@@ -780,58 +798,6 @@ else:
             date_news_map = {}
             for _, nrow in news_df[news_df["종목명"] == stock_name].iterrows():
                 dt = nrow["뉴스날짜"]; date_news_map.setdefault(dt, []).append({"title": nrow["뉴스"], "link": nrow["링크"]})
-            if os.path.exists(CACHE_FILE):
-                for news_text, val in cache_dict.items():
-                    dt = val.get("뉴스날짜")
-                    if dt and (stock_name in news_text):
-                        date_news_map.setdefault(dt, [])
-                        if not any(n["title"] == news_text for n in date_news_map[dt]):
-                            date_news_map[dt].append({"title": news_text, "link": None})
             plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_bad_{code}_{idx}", news_dict=date_news_map)
-
-        # 캐시 전체 보기
-        if graph_show_in_cache:
-            st.write("## 지금까지의 데이터")
-            cached_rows = []
-            for news_title, val in cache_dict.items():
-                stock = find_stock_in_text(news_title, set(stock_names))
-                if stock:
-                    cached_rows.append({
-                        "종목명": stock, "뉴스": news_title, "링크": None, "요약": None,
-                        "뉴스날짜": val.get("뉴스날짜"), "뉴스판별": val.get("뉴스판별", "분석불가"), "AI설명": val.get("AI설명", "")
-                    })
-            if len(cached_rows) == 0:
-                st.info("캐시에 종목명이 포함된 저장 데이터가 없습니다.")
-            else:
-                cached_df = pd.DataFrame(cached_rows).drop_duplicates(["종목명","뉴스"])
-                def _color(tag):
-                    if tag == "호재": return "color: red; font-weight: bold;"
-                    if tag == "악재": return "color: blue; font-weight: bold;"
-                    if tag == "중립": return "color: gray;"
-                    return ""
-                st.write("### 🗂 캐시된 전체 뉴스")
-                st.dataframe(
-                    cached_df[["종목명","뉴스","뉴스날짜","뉴스판별","AI설명"]].style.apply(
-                        lambda row: [_color(row["뉴스판별"])]*5, axis=1
-                    ),
-                    use_container_width=True
-                )
-                for idx, stock_name in enumerate(cached_df["종목명"].dropna().unique().tolist()):
-                    code = get_code_from_name(stock_name)
-                    if not code:
-                        st.warning(f"{stock_name} 종목코드 없음, 차트 생략"); continue
-                    try:
-                        df_price = crawl_naver_daily_price(code, max_days=60)
-                    except Exception as e:
-                        st.warning(f"{stock_name} 시세 크롤링 실패: {e}"); continue
-                    date_news_map = {}
-                    subset = cached_df[cached_df["종목명"] == stock_name]
-                    for _, nrow in subset.iterrows():
-                        dt = nrow["뉴스날짜"]
-                        if dt:
-                            date_news_map.setdefault(dt, [])
-                            if not any(n["title"] == nrow["뉴스"] for n in date_news_map[dt]):
-                                date_news_map[dt].append({"title": nrow["뉴스"], "link": None})
-                    plot_bollinger_20day(df_price, stock_name, code, key=f"bollinger_cache_{code}_{idx}", news_dict=date_news_map)
 
         st.session_state.is_running = False
