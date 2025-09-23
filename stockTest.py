@@ -6,7 +6,6 @@ import time
 import os
 import json
 from datetime import datetime, timedelta
-from openai import OpenAI
 import plotly.graph_objects as go
 from dotenv import load_dotenv
 import re
@@ -19,6 +18,8 @@ CACHE_FILE = "cache_news_ai.json"
 
 # 날짜별 섹션 뉴스(일반 모드)
 NEWS_BY_DATE_URL = "https://finance.naver.com/news/mainnews.naver?&date={date}&page={page}"
+CLOVA_API_KEY = os.getenv("CLOVA_API_KEY")
+CLOVA_URL = "https://clovastudio.stream.ntruss.com/testapp/v1/chat-completions/HCX-003"
 
 st.set_page_config(page_title="KRX 뉴스-AI 자동화", layout="centered")
 st.title("KRX 상장종목 뉴스 + AI 분석 자동화")
@@ -190,25 +191,47 @@ def find_stock_in_text(text, stock_names_set):
 
 def classify_news(title, summary):
     news_text = f"{title} {summary}"
-    prompt = f"""아래 뉴스가 해당 기업에 호재(상승 가능성), 악재(하락 가능성), 중립 중 어떤 영향을 미칠지 한글로 단답(호재/악재/중립)과 이유(1문장)를 알려줘.
-뉴스: {news_text}"""
+    prompt = f"""
+아래 뉴스를 분석해서 반드시 JSON 형식으로만 출력해줘.
+다른 텍스트는 쓰지 말고 아래 키만 포함해야 해.
+
+{{
+  "tag": "호재" | "악재" | "중립",
+  "description": "한 문장 설명",
+  "category": "반도체, 자동차, 음식료, 금융, IT, 헬스케어 등 중 하나"
+}}
+
+뉴스: {news_text}
+"""
+
+    headers = {
+        "Authorization": f"Bearer {CLOVA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "topP": 0.8,
+        "temperature": 0.2,
+        "maxTokens": 256
+    }
+
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0
-        )
-        answer = response.choices[0].message.content.strip()
-        if answer.startswith("호재"):
-            tag = "호재"
-        elif answer.startswith("악재"):
-            tag = "악재"
-        else:
-            tag = "중립"
-        return tag, answer
+        res = requests.post(CLOVA_URL, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        data = res.json()
+        answer = data["result"]["message"]["content"].strip()
+
+        # JSON 부분만 추출
+        match = re.search(r"\{.*\}", answer, re.S)
+        if match:
+            answer_json = match.group(0)
+            parsed = json.loads(answer_json)
+            return parsed
+
+        return {"tag": "분석불가", "description": "AI 응답 파싱 실패", "category": "기타"}
     except Exception as e:
-        return "분석불가", f"API 오류: {e}"
+        return {"tag": "분석불가", "description": f"CLOVA 오류: {e}", "category": "기타"}
 
 def safe_float(val):
     try:
@@ -586,7 +609,6 @@ else:
             cache_dict = {}
 
         openai_api_key = st.session_state.api_key
-        client = OpenAI(api_key=openai_api_key)
 
         news_df["뉴스판별"] = ""
         news_df["AI설명"] = ""
@@ -595,27 +617,29 @@ else:
         for idx, row in news_df.iterrows():
             cached = cache_dict.get(row["뉴스"])
             if cached:
-                if today_only and cached.get("뉴스날짜") != today_str:
-                    tag, explanation = classify_news(row["뉴스"], row["요약"])
-                    news_df.at[idx, "뉴스판별"] = tag
-                    news_df.at[idx, "AI설명"] = explanation
-                    st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
-                    time.sleep(0.05)
-                    cache_dict[row["뉴스"]] = {"뉴스판별": tag, "AI설명": explanation, "뉴스날짜": row["뉴스날짜"]}
-                else:
-                    news_df.at[idx, "뉴스판별"] = cached["뉴스판별"]
-                    news_df.at[idx, "AI설명"] = cached["AI설명"]
-                    st.info(f"[캐시] {row['종목명']}: {row['뉴스']} => {cached['뉴스판별']}")
+                # 캐시가 있으면 그대로 사용
+                news_df.at[idx, "뉴스판별"] = cached["tag"]
+                news_df.at[idx, "AI설명"] = cached["description"]
+                news_df.at[idx, "카테고리"] = cached["category"]
+                st.info(f"[캐시] {row['종목명']}: {row['뉴스']} => {cached['tag']}")
             else:
-                tag, explanation = classify_news(row["뉴스"], row["요약"])
-                news_df.at[idx, "뉴스판별"] = tag
-                news_df.at[idx, "AI설명"] = explanation
-                st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {tag}")
+                ai_result = classify_news(row["뉴스"], row["요약"])
+                news_df.at[idx, "뉴스판별"] = ai_result["tag"]
+                news_df.at[idx, "AI설명"] = ai_result["description"]
+                news_df.at[idx, "카테고리"] = ai_result["category"]
+
+                cache_dict[row["뉴스"]] = {
+                    "tag": ai_result["tag"],
+                    "description": ai_result["description"],
+                    "category": ai_result["category"],
+                    "뉴스날짜": row["뉴스날짜"]
+                }
+                st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {ai_result['tag']}")
                 time.sleep(0.05)
-                cache_dict[row["뉴스"]] = {"뉴스판별": tag, "AI설명": explanation, "뉴스날짜": row["뉴스날짜"]}
 
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+
 
         # 재무
         finance_results = []
@@ -690,8 +714,9 @@ else:
         result_table = pd.merge(news_df, df_finance, on="종목명", how="left")
         result_table["오늘기사"] = result_table["뉴스판별"]
 
-        show_cols = ["종목명", "뉴스", "요약", "뉴스날짜", "뉴스판별", "AI설명",
-                     "예상주가_표시", "현재가_표시", "상승여력_표시", "오늘기사", "링크"]
+        show_cols = ["종목명", "뉴스", "요약", "뉴스날짜", "뉴스판별", "AI설명", "카테고리",
+             "예상주가_표시", "현재가_표시", "상승여력_표시", "오늘기사", "링크"]
+
         for col in ["예상주가_표시", "현재가_표시", "상승여력_표시"]:
             if col not in result_table.columns:
                 result_table[col] = "N/A"
