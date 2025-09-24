@@ -212,46 +212,45 @@ def find_stock_in_text(text, stock_names_set):
 def classify_news(title, summary):
     news_text = f"{title} {summary}"
     prompt = f"""
-아래 뉴스를 분석해서 반드시 JSON 형식으로만 출력해줘.
-다른 텍스트는 쓰지 말고 아래 키만 포함해야 해.
+아래 뉴스를 보고 JSON 형식으로만 출력해라.
 
+형식:
 {{
-  "tag": "호재" | "악재" | "중립",
+  "stock_nm": "뉴스에서 직접적으로 지목하거나 영향을 받을 주식명 (예: 삼성전자, 현대차, LG화학). 
+               특정 종목이 아니라 전체 시장에 영향을 준다면 '전체'",
+  "category": "관련 산업 카테고리 (예: 반도체, 자동차, 음식료, 금융, IT, 헬스케어 등)",
+  "tag": "호재 or 악재 or 중립",
   "description": "한 문장 설명",
-  "category": "반도체, 자동차, 음식료, 금융, IT, 헬스케어 등 중 하나"
+  "power": 0~100 사이 정수 (뉴스가 해당 종목/시장에 미치는 영향력 강도, 숫자가 클수록 영향 큼)
 }}
 
 뉴스: {news_text}
 """
-
     headers = {
         "Authorization": f"Bearer {CLOVA_API_KEY}",
         "Content-Type": "application/json"
     }
-
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        "topP": 0.8,
         "temperature": 0.2,
-        "maxTokens": 256
+        "topP": 0.8,
+        "maxTokens": 512
     }
 
     try:
         res = requests.post(CLOVA_URL, headers=headers, json=payload, timeout=30)
         res.raise_for_status()
-        data = res.json()
-        answer = data["result"]["message"]["content"].strip()
-
-        # JSON 부분만 추출
-        match = re.search(r"\{.*\}", answer, re.S)
-        if match:
-            answer_json = match.group(0)
-            parsed = json.loads(answer_json)
-            return parsed
-
-        return {"tag": "분석불가", "description": "AI 응답 파싱 실패", "category": "기타"}
+        answer = res.json()["result"]["message"]["content"].strip()
+        return json.loads(answer)
     except Exception as e:
-        return {"tag": "분석불가", "description": f"CLOVA 오류: {e}", "category": "기타"}
+        return {
+            "stock_nm": "분석불가",
+            "category": "기타",
+            "tag": "중립",
+            "description": f"CLOVA 오류: {e}",
+            "power": 0
+        }
+
 
 def safe_float(val):
     try:
@@ -262,28 +261,30 @@ def safe_float(val):
 def crawl_naver_daily_price(stock_code, max_days=60):
     return crawl_naver_daily_price_cached(stock_code, max_days=max_days)
 
-def get_existing_news(engine, title):
-    sql = text("SELECT id, tag, category, description, date FROM NEWS_DATA WHERE title = :title")
+def get_existing_news(engine, title, stock_nm):
+    sql = text("SELECT id, stock_nm, tag, category, description, date FROM NEWS_DATA WHERE title = :title AND stock_nm = :stock_nm")
     with engine.connect() as conn:
-        row = conn.execute(sql, {"title": title}).fetchone()
+        row = conn.execute(sql, {"title": title, "stock_nm": stock_nm}).fetchone()
         if row:
             return dict(row._mapping)
     return None
 
-def insert_news_to_db(engine, title, tag, category, description, date_str):
+
+def insert_news_to_db(engine, title, stock_nm, tag, category, description, power, date_str):
     sql = text("""
-        INSERT INTO NEWS_DATA (title, tag, category, description, date)
-        VALUES (:title, :tag, :category, :description, :date)
+        INSERT INTO NEWS_DATA (title, stock_nm, tag, category, description, power, date)
+        VALUES (:title, :stock_nm, :tag, :category, :description, :power, :date)
     """)
     with engine.begin() as conn:
         conn.execute(sql, {
             "title": title,
+            "stock_nm": stock_nm,
             "tag": tag,
             "category": category,
             "description": description,
+            "power": power,
             "date": date_str
         })
-
 
 
 def plot_bollinger_20day(df_price, stock_name, stock_code, key=None, news_dict=None):
@@ -394,9 +395,124 @@ def parse_mainnews_page(html_bytes, fallback_date_str: str, stock_key_norm: str)
             })
     return results
 
+
 # ------------------- 모드별 UI/로직 -------------------
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
+
+# ------------------- 챗봇 ----------------------------
+# --- 챗봇 버튼 위치 (CSS) ---
+
+if "chat_open" not in st.session_state:
+    st.session_state.chat_open = False
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# 버튼 표시
+if st.button("챗봇에게 물어보기", key="chat_btn"):
+    st.session_state.chat_open = not st.session_state.chat_open
+
+# --- 챗봇 창 ---
+if st.session_state.chat_open:
+    st.sidebar.title("RAG 챗봇")
+
+    chat_container = st.sidebar.container()
+    input_container = st.sidebar.container()
+
+    # 1) 대화 메시지 표시
+    with chat_container:
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    # 2) 입력창을 항상 아래 고정
+    with input_container:
+        question = st.chat_input("뉴스/주식 질문하기")
+
+    if question:
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(question)
+
+        st.session_state.chat_history.append({"role": "user", "content": question})
+
+        # 로딩 중 메시지 먼저 출력
+        with chat_container:
+            with st.chat_message("assistant"):
+                loading_placeholder = st.empty()
+                loading_placeholder.markdown("로딩 중.....")
+
+        # --- CLOVA 질문 해석 ---
+        parse_prompt = f"""
+        사용자의 질문을 바탕으로 아래 JSON 형식으로만 답해라 무조건.
+        한국어 그대로 주식명을 사용해야 하고, 만약 이름이 이상하다 싶으면 예측해 예를들어
+        "삼전" 이라고 하면 "삼성전자" 겠구나 이런식으로, 전체적으로 물어보는거 같으면 "전체"로 검색 하면 다 나오니까 필요하면 이걸로 해.
+        {{
+          "stock": "조회할 주식명 (예: 삼성전자, 현대차, 전체)",
+          "days": 최근 N일 (정수, 없으면 기본 30),
+          "limit": 최대 결과 개수 (없으면 20)
+        }}
+        질문: "{question}"
+        """
+        headers = {"Authorization": f"Bearer {CLOVA_API_KEY}", "Content-Type": "application/json"}
+        payload = {"messages": [{"role": "user", "content": parse_prompt}]}
+        res = requests.post(CLOVA_URL, headers=headers, json=payload, timeout=30)
+        parsed = json.loads(res.json()["result"]["message"]["content"])
+
+        stock = parsed.get("stock", "전체")
+        days = int(parsed.get("days", 30))
+        limit = int(parsed.get("limit", 20))
+
+        # --- DB 검색 ---
+        with engine.connect() as conn:
+            sql = text("""
+                SELECT title, stock_nm, tag, category, description, power, date
+                FROM NEWS_DATA
+                WHERE (:stock = '전체' OR stock_nm = :stock)
+                  AND date >= :start_date
+                ORDER BY power DESC, date DESC
+                LIMIT :limit
+            """)
+            rows = conn.execute(sql, {
+                "stock": stock,
+                "start_date": (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d"),
+                "limit": limit
+            }).fetchall()
+
+        if rows:
+            df = pd.DataFrame(rows, columns=["title","stock_nm","tag","category","description","power","date"])
+            context = "\n".join([
+                f"{r['date']} [{r['stock_nm']}] {r['title']} "
+                f"({r['tag']}, {r['category']}, power={r['power']}): {r['description']}"
+                for r in df.to_dict(orient="records")
+            ])
+        else:
+            context = "관련 뉴스 없음."
+
+        answer_prompt = f"""
+        사용자가 "{question}" 라고 물었습니다.
+        아래는 최근 {days}일 동안 {stock} 관련 뉴스 데이터입니다.
+        반드시 이 데이터를 근거로 종합적으로 분석해서 답변하세요.
+        데이터에 없는 내용은 추측하지 말고 '관련 뉴스 없음'이라고 말하세요.
+        power 값은 해당 뉴스의 영향력을 예측한 값이니까 만약 질문이 예측해줘 혹은 추천해줘 이런내용이면 이 power 값을 참조하고
+        가장 영향을 준 기사를 보여주는 것도 좋아
+        데이터:
+        {context}
+        """
+        payload = {
+            "messages": [{"role": "user", "content": answer_prompt}],
+            "temperature": 0.4,
+            "topP": 0.8,
+            "maxTokens": 512
+        }
+        res = requests.post(CLOVA_URL, headers=headers, json=payload, timeout=30)
+        answer = res.json()["result"]["message"]["content"]
+
+        # --- 로딩 메시지 교체 ---
+        loading_placeholder.markdown(answer)
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+
 
 # ===== 특정 기사만 보기 모드 (날짜 섹션 전체 순회 + 종목명 필터) =====
 if st.session_state.specific_mode:
@@ -561,11 +677,6 @@ else:
 
     # -------- 일반 모드: 메인뉴스 전체 페이지 순회 크롤러 --------
     def crawl_mainnews_all_pages(stock_names, today_only=True, max_pages=200):
-        """
-        네이버 금융 메인뉴스를 page=1부터 기사 없을 때까지 전부 순회.
-        제목/요약에 종목명이 포함되면 수집.
-        today_only=True면 '오늘 날짜'가 아닌 기사부터는 이후 페이지 순회 조기 종료.
-        """
         results = []
         stock_set = set(stock_names)
         today_str = datetime.today().strftime("%Y-%m-%d")
@@ -649,7 +760,7 @@ else:
         today_str = datetime.today().strftime("%Y-%m-%d")
 
         for idx, row in news_df.iterrows():
-            existing = get_existing_news(engine, row["뉴스"])
+            existing = get_existing_news(engine, row["뉴스"], row["종목명"])
             if existing:
                 news_df.at[idx, "뉴스판별"] = existing["tag"]
                 news_df.at[idx, "AI설명"] = existing["description"]
@@ -661,7 +772,7 @@ else:
                 news_df.at[idx, "AI설명"] = ai_result["description"]
                 news_df.at[idx, "카테고리"] = ai_result["category"]
 
-                insert_news_to_db(engine, row["뉴스"], ai_result["tag"], ai_result["category"], ai_result["description"], row["뉴스날짜"])
+                insert_news_to_db(engine,row["뉴스"],row["종목명"],ai_result["tag"],ai_result["category"],ai_result["description"],ai_result["power"],row["뉴스날짜"])
                 st.info(f"[AI분석]{row['종목명']}: {row['뉴스']} => {ai_result['tag']}")
                 time.sleep(0.05)
 
