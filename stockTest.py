@@ -133,7 +133,7 @@ def submit_api_key():
 if st.session_state.api_key is None:
     st.text_input("API 키가 있는 ENV 파일을 받아 주세요.", type="password", key="api_key_input", on_change=submit_api_key)
 else:
-    st.success("✅ ENV 파일 인식 완료")
+    st.success("해당 프로그램은 네이버 뉴스를 기준으로 최근 호재 뉴스들을 판단합니다.")
     
 
 # 모드 토글 상태
@@ -143,7 +143,7 @@ if "specific_mode" not in st.session_state:
 # 파일 체크
 file_exists = os.path.isfile(KRX_FILE)
 if file_exists and (st.session_state.api_key is not None):
-    st.success(f"✅ '{KRX_FILE}' 파일이 확인되었습니다.")
+    st.success(f"KRX 에서 제공하는 국내 상장 정보를 이용합니다.")
 else:
     if not file_exists:
         st.warning(
@@ -153,8 +153,6 @@ else:
             "파일 -> 내보내기 -> 파일 형식 변경 -> Excel 97 - 2003 통합 문서로 내보내기\n"
             "'krx_temp.xls'로 이름을 변경하여 이 파이썬 파일과 같은 폴더에 위치시켜 주세요."
         )
-    if st.session_state.api_key is None:
-        st.warning("❌ OpenAI API 키를 입력해주세요.")
 
 # KRX 종목 로딩
 if file_exists:
